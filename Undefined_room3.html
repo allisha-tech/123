@@ -1,0 +1,732 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>성질 전이 퍼즐 - 아트 복구 및 버그 수정</title>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #1a1a1a; }
+        
+        #crosshair {
+            position: absolute; top: 50%; left: 50%; width: 6px; height: 6px;
+            background-color: rgba(255, 255, 255, 0.9); border-radius: 50%;
+            transform: translate(-50%, -50%); pointer-events: none; z-index: 100;
+            box-shadow: 0 0 4px rgba(0,0,0,0.5);
+        }
+
+        #hud {
+            position: absolute; bottom: 30px; left: 50%; transform: translateX(-50%);
+            display: flex; gap: 40px; font-family: 'Malgun Gothic', sans-serif; color: white;
+            background: rgba(30, 30, 35, 0.85); padding: 15px 40px; border-radius: 12px; 
+            z-index: 100; box-shadow: 0 4px 15px rgba(0,0,0,0.5); border: 1px solid #444;
+        }
+        .hand-status { text-align: center; }
+        .hand-title { font-size: 13px; color: #a0a0ab; margin-bottom: 8px; letter-spacing: 1px; }
+        .hand-prop { font-size: 22px; font-weight: bold; color: #4ade80; }
+
+        #stance-ui {
+            position: absolute; top: 25px; right: 25px;
+            color: white; font-family: 'Malgun Gothic', sans-serif; font-size: 16px; font-weight: bold;
+            background: rgba(30, 30, 35, 0.85); padding: 10px 20px; border-radius: 8px; 
+            z-index: 100; border: 1px solid #444;
+        }
+
+        #notification {
+            position: absolute; top: 80px; left: 50%; transform: translateX(-50%);
+            color: #fff; font-family: 'Malgun Gothic', sans-serif; font-size: 16px; font-weight: bold;
+            background: rgba(239, 68, 68, 0.9); padding: 12px 25px; border-radius: 8px;
+            display: none; z-index: 100; text-align: center; white-space: pre-wrap;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.3);
+        }
+
+        #blocker {
+            position: absolute; width: 100%; height: 100%; background-color: rgba(20,20,25,0.9);
+            display: flex; flex-direction: column; justify-content: center; align-items: center;
+            color: white; font-family: 'Malgun Gothic', sans-serif; z-index: 200; cursor: pointer;
+        }
+        .guide-text { color: #aaa; font-size: 15px; margin-top: 25px; text-align: center; line-height: 1.8; background: rgba(0,0,0,0.3); padding: 20px; border-radius: 10px;}
+        .guide-highlight { color: #4ade80; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <div id="crosshair"></div>
+    <div id="stance-ui">자세: 서있기</div>
+    <div id="notification">알림 메시지</div>
+    
+    <div id="hud">
+        <div class="hand-status">
+            <div class="hand-title">왼손 (좌클릭 - 정적)</div>
+            <div id="left-hand" class="hand-prop">비어있음</div>
+        </div>
+        <div class="hand-status">
+            <div class="hand-title">오른손 (우클릭 - 동적)</div>
+            <div id="right-hand" class="hand-prop">비어있음</div>
+        </div>
+    </div>
+
+    <div id="blocker">
+        <h1 style="font-size: 32px; margin-bottom: 10px;">성질 전이 퍼즐 (완성본)</h1>
+        <p style="color: #ccc;">화면을 클릭하여 게임에 진입하세요</p>
+        <div class="guide-text">
+            <span class="guide-highlight">이동:</span> WASD &nbsp;|&nbsp; <span class="guide-highlight">점프:</span> Space<br>
+            <span class="guide-highlight">정적 성질(왼손):</span> 좌클릭 &nbsp;|&nbsp; <span class="guide-highlight">동적 성질(오른손):</span> 우클릭<br>
+            <span class="guide-highlight">집기/놓기:</span> E &nbsp;|&nbsp; <span class="guide-highlight">던지기:</span> F<br>
+        </div>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/PointerLockControls.js"></script>
+
+    <script>
+        let camera, scene, renderer, controls;
+        let moveForward = false, moveBackward = false, moveLeft = false, moveRight = false;
+        let prevTime = performance.now();
+        const velocity = new THREE.Vector3();
+        const direction = new THREE.Vector3();
+
+        let isRunning = false;
+        let stance = 'stand'; 
+        let targetCameraHeight = 1.6;
+        let canJump = true;
+        let jumpForce = 10.0; 
+        const gravity = 30.0;
+
+        const raycaster = new THREE.Raycaster();
+        const downRaycaster = new THREE.Raycaster(); 
+        const screenCenter = new THREE.Vector2(0, 0);
+        const interactDistance = 3.0; 
+        
+        const interactableObjects = []; 
+        const walkableObjects = []; 
+
+        let leftHandProperty = null;  
+        let rightHandProperty = null; 
+        let heldObject = null; 
+        const thrownObjects = [];
+
+        let leftHandMesh, rightHandMesh;
+        const handRestZ = -0.8; 
+
+        // 방 오브젝트
+        let paperBox, windowMesh, seesawPad, seesawBoard, safeBox, exitDoor1;
+        let toyTrain, electricDoor, rubberBand, table, balloon, wardrobe, exitDoor2;
+        let plushie, stump, basketball, moss, sprout, finalExitDoor;
+
+        init();
+        animate();
+
+        function init() {
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x2c303a); 
+            scene.fog = new THREE.Fog(0x2c303a, 15, 80); // 안개 거리 연장
+
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            scene.add(camera); 
+
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.6); 
+            scene.add(ambientLight);
+
+            const dirLight1 = new THREE.DirectionalLight(0xfff5e6, 0.7); dirLight1.position.set(-10, 15, 10); dirLight1.castShadow = true; scene.add(dirLight1);
+            const dirLight2 = new THREE.DirectionalLight(0xe6f5ff, 0.7); dirLight2.position.set(-10, 15, -25); dirLight2.castShadow = true; scene.add(dirLight2);
+            const dirLight3 = new THREE.DirectionalLight(0xe6ffe6, 0.7); dirLight3.position.set(10, 15, -50); dirLight3.castShadow = true; scene.add(dirLight3);
+
+            controls = new THREE.PointerLockControls(camera, document.body);
+            controls.getObject().position.y = targetCameraHeight; 
+            
+            // 1인칭 손
+            const handGeo = new THREE.BoxGeometry(0.12, 0.12, 0.4);
+            leftHandMesh = new THREE.Mesh(handGeo, new THREE.MeshStandardMaterial({ color: 0x555555, transparent: true, opacity: 0.3 }));
+            leftHandMesh.position.set(-0.35, -0.3, handRestZ); leftHandMesh.rotation.y = Math.PI / 8; camera.add(leftHandMesh);
+
+            rightHandMesh = new THREE.Mesh(handGeo, new THREE.MeshStandardMaterial({ color: 0x555555, transparent: true, opacity: 0.3 }));
+            rightHandMesh.position.set(0.35, -0.3, handRestZ); rightHandMesh.rotation.y = -Math.PI / 8; camera.add(rightHandMesh);
+
+            const blocker = document.getElementById('blocker');
+            blocker.addEventListener('click', () => { controls.lock(); });
+            controls.addEventListener('lock', () => { blocker.style.display = 'none'; });
+            controls.addEventListener('unlock', () => { blocker.style.display = 'flex'; });
+            document.addEventListener('contextmenu', event => event.preventDefault());
+
+            const onKeyDown = function (event) {
+                switch (event.code) {
+                    case 'KeyW': moveForward = true; break;
+                    case 'KeyA': moveLeft = true; break;
+                    case 'KeyS': moveBackward = true; break;
+                    case 'KeyD': moveRight = true; break;
+                    case 'ShiftLeft': isRunning = true; break; 
+                    case 'KeyC': setStance('crouch'); break;   
+                    case 'ControlLeft': setStance('prone'); break; 
+                    case 'Space': 
+                        if (canJump && jumpForce > 0) { velocity.y += jumpForce; canJump = false; } 
+                        break;
+                    case 'KeyE': handleEKey(); break; 
+                    case 'KeyF': handleFKey(); break; 
+                }
+            };
+            const onKeyUp = function (event) {
+                switch (event.code) {
+                    case 'KeyW': moveForward = false; break;
+                    case 'KeyA': moveLeft = false; break;
+                    case 'KeyS': moveBackward = false; break;
+                    case 'KeyD': moveRight = false; break;
+                    case 'ShiftLeft': isRunning = false; break;
+                    case 'KeyC': case 'ControlLeft': setStance('stand'); break;
+                }
+            };
+            document.addEventListener('keydown', onKeyDown);
+            document.addEventListener('keyup', onKeyUp);
+            document.addEventListener('mousedown', onMouseClick);
+
+            function createStylizedMesh(geometry, color, isTransparent=false, opacity=1.0) {
+                const material = new THREE.MeshStandardMaterial({ color: color, transparent: isTransparent, opacity: opacity, roughness: 0.8, metalness: 0.1 });
+                const mesh = new THREE.Mesh(geometry, material);
+                mesh.castShadow = true; mesh.receiveShadow = true;
+                const edges = new THREE.EdgesGeometry(geometry);
+                const line = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0x111111, linewidth: 2 }));
+                line.userData.isOutline = true; mesh.add(line);
+                return mesh;
+            }
+
+            // ==========================================
+            // [ 공통 지형 세팅 ]
+            // ==========================================
+            const wallMaterial = new THREE.MeshStandardMaterial({ color: 0xd0d4dc, roughness: 0.9 });
+            const floorMaterial = new THREE.MeshStandardMaterial({ color: 0x9ca3af, roughness: 0.8 });
+            
+            const floor1 = new THREE.Mesh(new THREE.PlaneGeometry(20, 20), floorMaterial); floor1.rotation.x = -Math.PI / 2; floor1.receiveShadow = true; scene.add(floor1); walkableObjects.push(floor1);
+            const floor2 = new THREE.Mesh(new THREE.PlaneGeometry(20, 20), floorMaterial); floor2.rotation.x = -Math.PI / 2; floor2.position.set(0, 0, -20); floor2.receiveShadow = true; scene.add(floor2); walkableObjects.push(floor2);
+            const floor3 = new THREE.Mesh(new THREE.PlaneGeometry(20, 30), floorMaterial); floor3.rotation.x = -Math.PI / 2; floor3.position.set(0, 0, -45); floor3.receiveShadow = true; scene.add(floor3); walkableObjects.push(floor3);
+
+            const wallLeft = new THREE.Mesh(new THREE.BoxGeometry(0.5, 15, 60), wallMaterial); wallLeft.position.set(-10, 7.5, -20); scene.add(wallLeft);
+            const wallRight = new THREE.Mesh(new THREE.BoxGeometry(0.5, 15, 60), wallMaterial); wallRight.position.set(10, 7.5, -20); scene.add(wallRight);
+            
+            const midWall1 = new THREE.Mesh(new THREE.BoxGeometry(8, 15, 0.5), wallMaterial); midWall1.position.set(-6, 7.5, -10); scene.add(midWall1);
+            const midWall2 = new THREE.Mesh(new THREE.BoxGeometry(8, 15, 0.5), wallMaterial); midWall2.position.set(6, 7.5, -10); scene.add(midWall2);
+            const midWallTop = new THREE.Mesh(new THREE.BoxGeometry(4, 10, 0.5), wallMaterial); midWallTop.position.set(0, 10, -10); scene.add(midWallTop); 
+
+            const backWallLeft = new THREE.Mesh(new THREE.BoxGeometry(8, 15, 0.5), wallMaterial); backWallLeft.position.set(-6, 7.5, -30); scene.add(backWallLeft);
+            const backWallRight = new THREE.Mesh(new THREE.BoxGeometry(8, 15, 0.5), wallMaterial); backWallRight.position.set(6, 7.5, -30); scene.add(backWallRight);
+            const backWallTop = new THREE.Mesh(new THREE.BoxGeometry(4, 10, 0.5), wallMaterial); backWallTop.position.set(0, 10, -30); scene.add(backWallTop);
+
+            const wallBack = new THREE.Mesh(new THREE.BoxGeometry(20, 15, 0.5), wallMaterial); wallBack.position.set(0, 7.5, -60); scene.add(wallBack);
+
+            // ==========================================
+            // [ 1. 첫 번째 방 ]
+            // ==========================================
+            exitDoor1 = createStylizedMesh(new THREE.BoxGeometry(4, 5, 0.2), 0x785640); exitDoor1.position.set(0, 2.5, -10); exitDoor1.userData = { name: '1방 출구문', isDoor: true, isOpen: false }; scene.add(exitDoor1); interactableObjects.push(exitDoor1);
+            safeBox = createStylizedMesh(new THREE.BoxGeometry(1.8, 2.2, 1.8), 0x5a636e); safeBox.position.set(-5, 1.1, -5); safeBox.userData = { name: '금고', originalStaticProperty: '무거움', staticProperty: '무거움', dynamicProperty: null, canHold: false }; scene.add(safeBox); interactableObjects.push(safeBox); walkableObjects.push(safeBox);
+            
+            const noteCanvas = document.createElement('canvas'); noteCanvas.width = 256; noteCanvas.height = 256; const ctx = noteCanvas.getContext('2d');
+            ctx.fillStyle = '#fef08a'; ctx.fillRect(0, 0, 256, 256); ctx.fillStyle = '#111111'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+            ctx.font = 'bold 45px "Malgun Gothic", sans-serif'; ctx.fillText('PASSWORD', 128, 70); ctx.font = 'bold 85px "Malgun Gothic", sans-serif'; ctx.fillText('1234', 128, 150);
+            const passwordNote = new THREE.Mesh(new THREE.PlaneGeometry(0.8, 0.8), new THREE.MeshBasicMaterial({ map: new THREE.CanvasTexture(noteCanvas) })); passwordNote.position.set(-5, 1.1, -4.3); scene.add(passwordNote);
+
+            paperBox = createStylizedMesh(new THREE.BoxGeometry(1, 1, 1), 0xcfa87e); paperBox.position.set(-3, 0.5, 2); paperBox.userData = { name: '종이박스', originalStaticProperty: '가벼움', staticProperty: '가벼움', dynamicProperty: null, canHold: true, holdScale: 0.35 }; scene.add(paperBox); interactableObjects.push(paperBox); walkableObjects.push(paperBox);
+            seesawPad = new THREE.Mesh(new THREE.PlaneGeometry(1.5, 1.5), new THREE.MeshBasicMaterial({ color: 0xfacc15, wireframe: true })); seesawPad.rotation.x = -Math.PI / 2; seesawPad.position.set(8, 0.02, -2); scene.add(seesawPad);
+            const fulcrum = createStylizedMesh(new THREE.ConeGeometry(0.8, 1.5, 4), 0x7f1d1d); fulcrum.position.set(8, 0.75, 2); scene.add(fulcrum);
+            seesawBoard = createStylizedMesh(new THREE.BoxGeometry(1.4, 0.2, 8), 0xcd5c5c); seesawBoard.position.set(8, 1.5, 2); seesawBoard.rotation.x = Math.PI / 8; scene.add(seesawBoard); walkableObjects.push(seesawBoard);
+            windowMesh = createStylizedMesh(new THREE.BoxGeometry(3, 2, 0.1), 0x60a5fa, true, 0.4); windowMesh.position.set(9.7, 5.0, 5.5); windowMesh.rotation.y = -Math.PI / 2; windowMesh.userData = { name: '창문', originalStaticProperty: '투명함', staticProperty: '투명함', dynamicProperty: null, canHold: false }; scene.add(windowMesh); interactableObjects.push(windowMesh);
+
+            // ==========================================
+            // [ 2. 두 번째 방 디테일 ]
+            // ==========================================
+            toyTrain = new THREE.Group();
+            const tBody = createStylizedMesh(new THREE.BoxGeometry(1.2, 0.6, 0.6), 0xeab308); tBody.position.y = 0.3;
+            const tCabin = createStylizedMesh(new THREE.BoxGeometry(0.6, 0.6, 0.6), 0xd97706); tCabin.position.set(-0.3, 0.9, 0);
+            const tChimney = createStylizedMesh(new THREE.CylinderGeometry(0.1, 0.1, 0.4), 0x333333); tChimney.position.set(0.4, 0.8, 0);
+            const tBumper = createStylizedMesh(new THREE.CylinderGeometry(0.1, 0.4, 0.6, 4), 0x999999); tBumper.position.set(0.6, 0.3, 0); tBumper.rotation.x = Math.PI/4; tBumper.rotation.z = -Math.PI/2;
+            const wheelGeo = new THREE.CylinderGeometry(0.2, 0.2, 0.65, 16); wheelGeo.rotateX(Math.PI/2);
+            const w1 = createStylizedMesh(wheelGeo, 0x111111); w1.position.set(-0.3, 0.2, 0);
+            const w2 = createStylizedMesh(wheelGeo, 0x111111); w2.position.set(0.3, 0.2, 0);
+            toyTrain.add(tBody, tCabin, tChimney, tBumper, w1, w2);
+            toyTrain.position.set(5, 0, -15);
+            toyTrain.userData = { name: '기차장난감', originalDynamicProperty: '동력', dynamicProperty: '동력', staticProperty: null, canHold: false };
+            scene.add(toyTrain); interactableObjects.push(toyTrain); walkableObjects.push(toyTrain);
+
+            electricDoor = new THREE.Group();
+            const ePanel = createStylizedMesh(new THREE.BoxGeometry(3, 3, 0.2), 0x9ca3af); ePanel.position.y = 1.5;
+            const eWindow = createStylizedMesh(new THREE.BoxGeometry(2, 1, 0.25), 0x4b5563); eWindow.position.y = 1.8;
+            electricDoor.add(ePanel, eWindow);
+            electricDoor.position.set(-8.5, 0, -15); electricDoor.rotation.y = Math.PI / 2;
+            electricDoor.userData = { name: '전동문', originalDynamicProperty: null, dynamicProperty: null, staticProperty: null, canHold: false, isOpen: false };
+            scene.add(electricDoor); interactableObjects.push(electricDoor); walkableObjects.push(electricDoor);
+
+            const alcoveWall = new THREE.Mesh(new THREE.BoxGeometry(3, 12, 0.5), wallMaterial); alcoveWall.position.set(-8.5, 6, -13.5); scene.add(alcoveWall);
+            const alcoveWall2 = new THREE.Mesh(new THREE.BoxGeometry(3, 12, 0.5), wallMaterial); alcoveWall2.position.set(-8.5, 6, -16.5); scene.add(alcoveWall2);
+
+            rubberBand = new THREE.Group();
+            const peg = createStylizedMesh(new THREE.CylinderGeometry(0.05, 0.05, 0.2), 0x999999); peg.rotation.x = Math.PI/2;
+            const band = createStylizedMesh(new THREE.TorusGeometry(0.3, 0.05, 8, 24), 0xef4444); band.scale.set(1, 1.5, 1); band.position.y = -0.3; 
+            rubberBand.add(peg, band);
+            rubberBand.position.set(-9.7, 2, -15); rubberBand.rotation.y = Math.PI / 2;
+            rubberBand.userData = { name: '고무줄', originalDynamicProperty: '탄성', dynamicProperty: '탄성', staticProperty: null, canHold: false };
+            scene.add(rubberBand); interactableObjects.push(rubberBand);
+
+            table = new THREE.Group();
+            const tTop = createStylizedMesh(new THREE.BoxGeometry(2.2, 0.1, 2.2), 0x5c4033); tTop.position.y = 1.0;
+            const legGeo = new THREE.BoxGeometry(0.15, 1.0, 0.15);
+            const l1 = createStylizedMesh(legGeo, 0x4a332a); l1.position.set(-0.9, 0.5, -0.9);
+            const l2 = createStylizedMesh(legGeo, 0x4a332a); l2.position.set(0.9, 0.5, -0.9);
+            const l3 = createStylizedMesh(legGeo, 0x4a332a); l3.position.set(-0.9, 0.5, 0.9);
+            const l4 = createStylizedMesh(legGeo, 0x4a332a); l4.position.set(0.9, 0.5, 0.9);
+            table.add(tTop, l1, l2, l3, l4);
+            table.position.set(0, 0, -20);
+            table.userData = { name: '탁자', originalDynamicProperty: null, dynamicProperty: null, staticProperty: null, canHold: false };
+            scene.add(table); interactableObjects.push(table); walkableObjects.push(table); 
+
+            balloon = new THREE.Group();
+            const bSphere = createStylizedMesh(new THREE.SphereGeometry(0.6, 16, 16), 0x3b82f6);
+            const bBase = createStylizedMesh(new THREE.ConeGeometry(0.1, 0.2, 8), 0x3b82f6); bBase.position.y = -0.6;
+            const bString = createStylizedMesh(new THREE.CylinderGeometry(0.01, 0.01, 2.0), 0xffffff); bString.position.y = -1.6;
+            balloon.add(bSphere, bBase, bString);
+            balloon.position.set(0, 9.0, -20);
+            balloon.userData = { name: '풍선', originalStaticProperty: '가벼움', staticProperty: '가벼움', dynamicProperty: null, canHold: false };
+            scene.add(balloon); interactableObjects.push(balloon);
+
+            wardrobe = new THREE.Group();
+            const wBody = createStylizedMesh(new THREE.BoxGeometry(3, 4.5, 1.5), 0x2d3748); wBody.position.y = 2.25;
+            const wDoor1 = createStylizedMesh(new THREE.BoxGeometry(1.4, 4.3, 0.1), 0x4a5568); wDoor1.position.set(-0.72, 2.25, 0.76);
+            const wDoor2 = createStylizedMesh(new THREE.BoxGeometry(1.4, 4.3, 0.1), 0x4a5568); wDoor2.position.set(0.72, 2.25, 0.76);
+            const wHandle1 = createStylizedMesh(new THREE.BoxGeometry(0.1, 0.4, 0.1), 0x111111); wHandle1.position.set(-0.2, 2.25, 0.85);
+            const wHandle2 = createStylizedMesh(new THREE.BoxGeometry(0.1, 0.4, 0.1), 0x111111); wHandle2.position.set(0.2, 2.25, 0.85);
+            wardrobe.add(wBody, wDoor1, wDoor2, wHandle1, wHandle2);
+            wardrobe.position.set(0, 0, -27.5);
+            wardrobe.userData = { name: '무거운 장농', originalStaticProperty: '무거움', staticProperty: '무거움', dynamicProperty: null, canHold: false, holdScale: 0.15 };
+            scene.add(wardrobe); interactableObjects.push(wardrobe); walkableObjects.push(wardrobe);
+
+            exitDoor2 = createStylizedMesh(new THREE.BoxGeometry(4, 5, 0.2), 0x785640); exitDoor2.position.set(0, 2.5, -30.0);
+            exitDoor2.userData = { name: '2방 출구문', isDoor: true, isOpen: false }; scene.add(exitDoor2); interactableObjects.push(exitDoor2);
+            const exitLight = new THREE.PointLight(0xffddaa, 1.5, 15); exitLight.position.set(0, 3, -31); scene.add(exitLight);
+
+
+            // ==========================================
+            // [ 3. 세 번째 방 디테일 ]
+            // ==========================================
+            const platform2F = createStylizedMesh(new THREE.BoxGeometry(10, 4, 10), 0x6b7280); 
+            platform2F.position.set(5, 2, -45); 
+            scene.add(platform2F); walkableObjects.push(platform2F);
+
+            basketball = new THREE.Group();
+            const bBall = createStylizedMesh(new THREE.SphereGeometry(0.4, 16, 16), 0xea580c);
+            const ring1 = new THREE.Mesh(new THREE.TorusGeometry(0.405, 0.015, 8, 32), new THREE.MeshBasicMaterial({color:0x111111})); ring1.userData.isOutline = true; ring1.userData.ignoreColorChange = true;
+            const ring2 = new THREE.Mesh(new THREE.TorusGeometry(0.405, 0.015, 8, 32), new THREE.MeshBasicMaterial({color:0x111111})); ring2.rotation.x = Math.PI/2; ring2.userData.isOutline = true; ring2.userData.ignoreColorChange = true;
+            basketball.add(bBall, ring1, ring2);
+            basketball.position.set(5, 4.4, -45);
+            basketball.userData = { name: '농구공', originalStaticProperty: null, staticProperty: null, dynamicProperty: null, canHold: true, holdScale: 0.4 };
+            scene.add(basketball); interactableObjects.push(basketball);
+
+            plushie = new THREE.Group();
+            const pTorso = createStylizedMesh(new THREE.BoxGeometry(1.4, 1.2, 1.2), 0xf472b6); pTorso.position.y = 0.6;
+            const pHead = createStylizedMesh(new THREE.BoxGeometry(1.0, 0.8, 1.0), 0xfbcfe8); pHead.position.set(0, 1.6, 0.2);
+            const pEarL = createStylizedMesh(new THREE.BoxGeometry(0.3, 0.3, 0.2), 0xf472b6); pEarL.position.set(-0.4, 2.1, 0.2);
+            const pEarR = createStylizedMesh(new THREE.BoxGeometry(0.3, 0.3, 0.2), 0xf472b6); pEarR.position.set(0.4, 2.1, 0.2);
+            const pArmL = createStylizedMesh(new THREE.BoxGeometry(0.4, 0.8, 0.4), 0xf472b6); pArmL.position.set(-0.9, 0.8, 0.2);
+            const pArmR = createStylizedMesh(new THREE.BoxGeometry(0.4, 0.8, 0.4), 0xf472b6); pArmR.position.set(0.9, 0.8, 0.2);
+            plushie.add(pTorso, pHead, pEarL, pEarR, pArmL, pArmR);
+            plushie.position.set(1.5, 0, -38);
+            plushie.userData = { name: '대형 곰인형', originalStaticProperty: null, staticProperty: null, dynamicProperty: null, canHold: false };
+            scene.add(plushie); interactableObjects.push(plushie); walkableObjects.push(plushie);
+
+            stump = new THREE.Group();
+            const sBase = createStylizedMesh(new THREE.CylinderGeometry(1.0, 1.2, 1.0, 10), 0x4a332a); sBase.position.y = 0.5;
+            const sTop = createStylizedMesh(new THREE.CylinderGeometry(0.95, 0.95, 0.05, 10), 0xd2b48c); sTop.position.y = 1.01;
+            stump.add(sBase, sTop);
+            stump.position.set(-6, 0, -40);
+            stump.userData = { name: '그루터기', originalStaticProperty: '단단함', staticProperty: '단단함', dynamicProperty: null, canHold: false };
+            scene.add(stump); interactableObjects.push(stump); walkableObjects.push(stump);
+
+            moss = new THREE.Group();
+            const m1 = createStylizedMesh(new THREE.DodecahedronGeometry(0.8, 0), 0x22c55e);
+            const m2 = createStylizedMesh(new THREE.DodecahedronGeometry(0.6, 0), 0x16a34a); m2.position.set(0.5, -0.3, 0.4);
+            const m3 = createStylizedMesh(new THREE.DodecahedronGeometry(0.7, 0), 0x15803d); m3.position.set(-0.6, -0.2, -0.3);
+            moss.add(m1, m2, m3);
+            moss.position.set(-9.2, 10, -48);
+            moss.userData = { name: '천장 이끼', originalDynamicProperty: '성장', dynamicProperty: '성장', staticProperty: null, canHold: false, isFallen: false };
+            scene.add(moss); interactableObjects.push(moss);
+
+            // 새싹 성장 구현 (나무 밑동 기준 피봇)
+            sprout = new THREE.Group();
+            const stemGeo = new THREE.BoxGeometry(2, 1.5, 1);
+            stemGeo.translate(0, 0.75, -0.5); 
+            const stem = createStylizedMesh(stemGeo, 0x4ade80);
+            const sLeaf = createStylizedMesh(new THREE.ConeGeometry(0.8, 1.2, 4), 0x22c55e); sLeaf.position.set(0, 1.5, -0.5); sLeaf.rotation.x = -Math.PI / 6;
+            stem.add(sLeaf);
+            sprout.add(stem);
+            sprout.position.set(-6, 1.0, -40); 
+            sprout.userData = { name: '새싹', originalDynamicProperty: null, dynamicProperty: null, staticProperty: null, canHold: false };
+            scene.add(sprout); interactableObjects.push(sprout); walkableObjects.push(sprout);
+
+            const finalExitPlatform = createStylizedMesh(new THREE.BoxGeometry(4, 1, 4), 0x374151);
+            finalExitPlatform.position.set(-6, 9.5, -58); scene.add(finalExitPlatform); walkableObjects.push(finalExitPlatform);
+            
+            finalExitDoor = createStylizedMesh(new THREE.BoxGeometry(3, 4, 0.2), 0x10b981); 
+            finalExitDoor.position.set(-6, 12.0, -59.9);
+            finalExitDoor.userData = { name: '최종 탈출구', isFinalDoor: true, isOpen: false };
+            scene.add(finalExitDoor); interactableObjects.push(finalExitDoor);
+
+            const exitLight3 = new THREE.PointLight(0x4ade80, 1.5, 15); exitLight3.position.set(-6, 12, -61); scene.add(exitLight3);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.shadowMap.enabled = true;
+            renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+            document.body.appendChild(renderer.domElement);
+            window.addEventListener('resize', onWindowResize);
+            
+            updateHandVisual(); 
+        }
+
+        function setStance(newStance) {
+            stance = newStance;
+            const ui = document.getElementById('stance-ui');
+            if (stance === 'crouch') { targetCameraHeight = 1.0; ui.innerText = "자세: 앉기"; }
+            else if (stance === 'prone') { targetCameraHeight = 0.5; ui.innerText = "자세: 엎드리기"; }
+            else { targetCameraHeight = 1.6; ui.innerText = "자세: 서있기"; }
+        }
+
+        function showNotification(msg, duration = 4000) {
+            const noti = document.getElementById('notification');
+            noti.innerText = msg; noti.style.display = 'block';
+            if(noti.timeoutId) clearTimeout(noti.timeoutId);
+            noti.timeoutId = setTimeout(() => { noti.style.display = 'none'; }, duration);
+        }
+
+        function handleEKey() {
+            if (!controls.isLocked) return;
+            if (heldObject) {
+                heldObject.scale.set(1, 1, 1); heldObject.rotation.set(0, 0, 0); 
+                camera.remove(heldObject); scene.add(heldObject);
+                const dropPos = new THREE.Vector3(); camera.getWorldDirection(dropPos);
+                dropPos.multiplyScalar(2.5); dropPos.add(camera.position);
+                
+                if (heldObject.userData.name === '종이박스' || heldObject.userData.name === '농구공') dropPos.y = 0.5;
+                else dropPos.y = 0; 
+                
+                heldObject.position.copy(dropPos); 
+                showNotification(`[${heldObject.userData.name}]을(를) 내려놓았습니다.`);
+                heldObject = null; leftHandMesh.visible = true; rightHandMesh.visible = true;
+            } else {
+                raycaster.setFromCamera(screenCenter, camera);
+                const intersects = raycaster.intersectObjects(interactableObjects, true);
+                if (intersects.length > 0 && intersects[0].distance <= interactDistance) {
+                    let target = intersects[0].object;
+                    while (target && !target.userData.name && target.parent) target = target.parent;
+                    if (!target.userData) return;
+
+                    if (target.userData.canHold) {
+                        heldObject = target;
+                        scene.remove(heldObject); camera.add(heldObject);
+                        const hScale = target.userData.holdScale || 0.3;
+                        heldObject.scale.set(hScale, hScale, hScale);
+                        heldObject.position.set(0.6, -0.4, -1.0); heldObject.rotation.set(0.2, -0.5, 0);
+                        showNotification(`[${heldObject.userData.name}]을(를) 집었습니다.`);
+                        leftHandMesh.visible = false; rightHandMesh.visible = false;
+                    } else if (!target.userData.isDoor && !target.userData.isFinalDoor) {
+                        showNotification(`${target.userData.name}은(는) 무겁거나 고정되어 들 수 없습니다.`);
+                    }
+                }
+            }
+        }
+
+        function handleFKey() {
+            if (!controls.isLocked || !heldObject) return;
+            const obj = heldObject; heldObject = null;
+            obj.scale.set(1, 1, 1); obj.rotation.set(0, 0, 0);
+            camera.remove(obj); scene.add(obj);
+            const startPos = new THREE.Vector3(); camera.getWorldPosition(startPos);
+            const dir = new THREE.Vector3(); camera.getWorldDirection(dir);
+            startPos.addScaledVector(dir, 1.5); obj.position.copy(startPos);
+            
+            const throwVelocity = dir.clone().multiplyScalar(15); throwVelocity.y += 5; 
+            thrownObjects.push({ mesh: obj, velocity: throwVelocity });
+            leftHandMesh.visible = true; rightHandMesh.visible = true;
+        }
+
+        function onMouseClick(event) {
+            if (!controls.isLocked || heldObject) return; 
+            raycaster.setFromCamera(screenCenter, camera);
+            
+            const intersects = raycaster.intersectObjects(interactableObjects, true);
+            if (intersects.length > 0) {
+                let targetObject = intersects[0].object;
+                while (targetObject && !targetObject.userData.name && targetObject.parent) targetObject = targetObject.parent;
+                if (!targetObject.userData) return;
+
+                if (intersects[0].distance > interactDistance) {
+                    showNotification("너무 멉니다. 더 가까이 다가가세요.");
+                    return;
+                }
+                
+                if (targetObject.userData.name === '1방 출구문') {
+                    controls.unlock();
+                    setTimeout(() => {
+                        const pw = prompt("도어락 비밀번호 4자리를 입력하세요:");
+                        if (pw === "1234") {
+                            showNotification("비밀번호 일치! 첫 번째 방의 문이 열립니다.");
+                            exitDoor1.userData.isOpen = true; exitDoor1.userData.isDoor = false; 
+                        } else { alert("비밀번호가 틀렸습니다."); }
+                        controls.lock();
+                    }, 100);
+                    return;
+                }
+
+                if (targetObject.userData.name === '2방 출구문') {
+                    if (!targetObject.userData.isOpen) {
+                        targetObject.userData.isOpen = true; targetObject.userData.isDoor = false; 
+                        showNotification("잠기지 않은 문입니다. 세 번째 방으로 이동하세요!");
+                    }
+                    return;
+                }
+
+                if (targetObject.userData.isFinalDoor) {
+                    if (!targetObject.userData.isOpen) {
+                        targetObject.userData.isOpen = true; targetObject.userData.isFinalDoor = false;
+                        showNotification("탈출 성공! 문이 열립니다.");
+                        setTimeout(() => { alert("축하합니다! 3개의 스테이지를 모두 돌파하고 탈출에 성공하셨습니다!"); }, 2500);
+                    }
+                    return;
+                }
+                
+                if (event.button === 0) {
+                    leftHandMesh.position.z -= 0.3; processInteraction(targetObject, 'static');
+                } else if (event.button === 2) {
+                    rightHandMesh.position.z -= 0.3; processInteraction(targetObject, 'dynamic');
+                }
+            }
+        }
+
+        function processInteraction(object, propertyType) {
+            const isStatic = (propertyType === 'static');
+            const handProp = isStatic ? leftHandProperty : rightHandProperty;
+            const objPropKey = isStatic ? 'staticProperty' : 'dynamicProperty';
+            const originalPropKey = isStatic ? 'originalStaticProperty' : 'originalDynamicProperty';
+            
+            if (handProp === null) {
+                const propToExtract = object.userData[objPropKey];
+                if (propToExtract) { 
+                    if (isStatic) leftHandProperty = propToExtract;
+                    else rightHandProperty = propToExtract;
+                    showNotification(`[추출] ${object.userData.name}에서 '${propToExtract}' 획득`);
+                } else {
+                    showNotification(`이 물체에는 추출할 ${isStatic?'정적':'동적'} 성질이 없습니다.`);
+                }
+            } else {
+                const injectedProp = handProp;
+                object.userData[objPropKey] = injectedProp;
+                showNotification(`[주입] ${object.userData.name}에 '${injectedProp}' 주입 됨`);
+                
+                updateObjectVisual(object, injectedProp);
+                handleSpecialLogic(object, injectedProp);
+
+                if (isStatic) leftHandProperty = null; else rightHandProperty = null;
+                if (object.userData.restoreTimeout) clearTimeout(object.userData.restoreTimeout);
+                
+                object.userData.restoreTimeout = setTimeout(() => {
+                    const originalProp = object.userData[originalPropKey];
+                    object.userData[objPropKey] = originalProp;
+                    showNotification(`[복구] ${object.userData.name}의 성질이 원래대로 돌아왔습니다.`);
+                    updateObjectVisual(object, originalProp); 
+                    handleSpecialLogic(object, originalProp);
+                }, 20000); 
+            }
+            updateHUD(); updateHandVisual(); 
+        }
+
+        function handleSpecialLogic(object, prop) {
+            if (object.userData.name === '무거운 장농') {
+                if (prop === '가벼움') object.userData.canHold = true;
+                else object.userData.canHold = false;
+            }
+        }
+
+        // 그룹의 자식(Child)까지 모두 순회하며 에러 없이 색상만 변경
+        function updateObjectVisual(object, prop) {
+            if(object.isMesh && !object.userData.isOutline && !object.userData.ignoreColorChange) applyVisual(object, prop);
+            else if(object.traverse) {
+                object.traverse((child) => {
+                    if (child.isMesh && !child.userData.isOutline && !child.userData.ignoreColorChange) applyVisual(child, prop);
+                });
+            }
+            
+            function applyVisual(child, prop) {
+                if (!child.userData.origColor) {
+                    child.userData.origColor = child.material.color.getHex();
+                    child.userData.origTransparent = child.material.transparent;
+                    child.userData.origOpacity = child.material.opacity;
+                }
+                if (prop === '투명함') {
+                    child.material.color.setHex(0x60a5fa); child.material.transparent = true; child.material.opacity = 0.4;          
+                } else if (prop === '무거움' || prop === '단단함') {
+                    child.material.color.setHex(0x374151); child.material.transparent = false; child.material.opacity = 1.0;          
+                } else if (prop === '가벼움') {
+                    child.material.color.setHex(0xcfa87e); child.material.transparent = false; child.material.opacity = 1.0; 
+                } else {
+                    child.material.color.setHex(child.userData.origColor);
+                    child.material.transparent = child.userData.origTransparent; child.material.opacity = child.userData.origOpacity;
+                }
+                
+                if (prop === '동력') {
+                    child.material.emissive.setHex(0xeab308); child.material.emissiveIntensity = 0.4;
+                } else if (prop === '탄성') {
+                    child.material.emissive.setHex(0xef4444); child.material.emissiveIntensity = 0.4;
+                } else if (prop === '성장') {
+                    child.material.emissive.setHex(0x22c55e); child.material.emissiveIntensity = 0.2;
+                } else {
+                    child.material.emissive.setHex(0x000000);
+                }
+            }
+        }
+
+        function updateHandVisual() {
+            if (leftHandProperty === '투명함') {
+                leftHandMesh.material.color.setHex(0x60a5fa); leftHandMesh.material.transparent = true; leftHandMesh.material.opacity = 0.5;
+            } else if (leftHandProperty === '무거움' || leftHandProperty === '단단함') {
+                leftHandMesh.material.color.setHex(0x374151); leftHandMesh.material.transparent = false; leftHandMesh.material.opacity = 1.0;
+            } else if (leftHandProperty === '가벼움') {
+                leftHandMesh.material.color.setHex(0xcfa87e); leftHandMesh.material.transparent = false; leftHandMesh.material.opacity = 1.0;
+            } else {
+                leftHandMesh.material.color.setHex(0x555555); leftHandMesh.material.transparent = true; leftHandMesh.material.opacity = 0.3;
+            }
+
+            if (rightHandProperty === '동력') {
+                rightHandMesh.material.color.setHex(0xeab308); rightHandMesh.material.transparent = false; rightHandMesh.material.opacity = 0.9;
+            } else if (rightHandProperty === '탄성') {
+                rightHandMesh.material.color.setHex(0xef4444); rightHandMesh.material.transparent = false; rightHandMesh.material.opacity = 0.9;
+            } else if (rightHandProperty === '성장') {
+                rightHandMesh.material.color.setHex(0x4ade80); rightHandMesh.material.transparent = false; rightHandMesh.material.opacity = 0.9;
+            } else {
+                rightHandMesh.material.color.setHex(0x555555); rightHandMesh.material.transparent = true; rightHandMesh.material.opacity = 0.3;
+            }
+        }
+
+        function updateHUD() {
+            document.getElementById('left-hand').innerText = leftHandProperty || "비어있음";
+            document.getElementById('right-hand').innerText = rightHandProperty || "비어있음";
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            const time = performance.now();
+
+            if (controls.isLocked === true) {
+                const delta = (time - prevTime) / 1000;
+                const playerObj = controls.getObject();
+
+                leftHandMesh.position.z += (handRestZ - leftHandMesh.position.z) * 8 * delta;
+                rightHandMesh.position.z += (handRestZ - rightHandMesh.position.z) * 8 * delta;
+
+                if (exitDoor1.userData.isOpen && exitDoor1.position.x > -4) exitDoor1.position.x -= 3 * delta;
+                if (exitDoor2.userData.isOpen && exitDoor2.position.x > -4) exitDoor2.position.x -= 3 * delta;
+                if (finalExitDoor.userData.isOpen && finalExitDoor.position.x > -9) finalExitDoor.position.x -= 3 * delta;
+
+                if (toyTrain.userData.dynamicProperty === '동력') toyTrain.position.x = 5 + Math.sin(time * 0.002) * 2;
+                if (electricDoor.userData.dynamicProperty === '동력') {
+                    if (electricDoor.position.y < 4.5) electricDoor.position.y += 3 * delta;
+                } else {
+                    if (electricDoor.position.y > 0) electricDoor.position.y -= 3 * delta;
+                }
+
+                // 나무 성장 애니메이션
+                if (sprout.userData.dynamicProperty === '성장') {
+                    sprout.scale.z += (21.0 - sprout.scale.z) * 2.0 * delta; 
+                    sprout.rotation.x += (-0.44 - sprout.rotation.x) * 2.0 * delta; 
+                } else {
+                    sprout.scale.z += (1.0 - sprout.scale.z) * 2.0 * delta; 
+                    sprout.rotation.x += (0 - sprout.rotation.x) * 2.0 * delta;
+                }
+
+                downRaycaster.set(playerObj.position, new THREE.Vector3(0, -1, 0));
+                const validWalkables = walkableObjects.filter(obj => obj !== heldObject);
+                const intersectsDown = downRaycaster.intersectObjects(validWalkables, true);
+                
+                let floorY = 0;
+                let onObject = null;
+                if (intersectsDown.length > 0) {
+                    floorY = intersectsDown[0].point.y;
+                    onObject = intersectsDown[0].object;
+                    while (onObject && !onObject.userData.name && onObject.parent) onObject = onObject.parent;
+                }
+
+                jumpForce = 10.0; 
+                if (onObject && onObject.userData.name === '탁자' && onObject.userData.dynamicProperty === '탄성') jumpForce = 15.0; 
+
+                // 곰인형 밟음 물리 로직
+                if (onObject && onObject.userData.name === '대형 곰인형') {
+                    if (onObject.userData.staticProperty !== '단단함') {
+                        onObject.scale.y += (0.2 - onObject.scale.y) * 8 * delta;
+                        jumpForce = 0; 
+                    } else {
+                        onObject.scale.y += (1.0 - onObject.scale.y) * 8 * delta;
+                    }
+                } else {
+                    plushie.scale.y += (1.0 - plushie.scale.y) * 8 * delta; 
+                }
+
+                let targetRot = Math.PI / 8; 
+                const distToPad = paperBox.position.distanceTo(seesawPad.position);
+                const isSeesawFixed = (distToPad < 2.5 && paperBox.userData.staticProperty === '무거움' && heldObject !== paperBox);
+                if (!isSeesawFixed && onObject && onObject.userData.name === undefined && playerObj.position.z > 2.0) targetRot = -Math.PI / 8; 
+                seesawBoard.rotation.x += (targetRot - seesawBoard.rotation.x) * 5 * delta;
+
+                velocity.y -= gravity * delta; 
+                playerObj.position.y += velocity.y * delta;
+
+                if (playerObj.position.y <= floorY + targetCameraHeight) {
+                    velocity.y = Math.max(0, velocity.y); 
+                    playerObj.position.y = floorY + targetCameraHeight;
+                    canJump = true;
+                }
+
+                let speedMultiplier = 40.0; 
+                if (isRunning && stance === 'stand') speedMultiplier = 80.0; 
+                if (stance === 'crouch') speedMultiplier = 20.0; 
+                if (stance === 'prone') speedMultiplier = 10.0; 
+
+                velocity.x -= velocity.x * 10.0 * delta;
+                velocity.z -= velocity.z * 10.0 * delta;
+                direction.z = Number(moveForward) - Number(moveBackward);
+                direction.x = Number(moveRight) - Number(moveLeft);
+                direction.normalize();
+
+                if (moveForward || moveBackward) velocity.z -= direction.z * speedMultiplier * delta;
+                if (moveLeft || moveRight) velocity.x -= direction.x * speedMultiplier * delta;
+
+                controls.moveRight(-velocity.x * delta);
+                controls.moveForward(-velocity.z * delta);
+
+                for (let i = thrownObjects.length - 1; i >= 0; i--) {
+                    const tObj = thrownObjects[i];
+                    tObj.velocity.y -= gravity * delta; 
+                    tObj.mesh.position.addScaledVector(tObj.velocity, delta);
+
+                    // 에러 픽스: 그룹인 경우 파라미터가 없으므로 삼항 연산자로 안전하게 처리
+                    const boxHeight = (tObj.mesh.geometry && tObj.mesh.geometry.parameters) ? tObj.mesh.geometry.parameters.height : 1.0;
+                    
+                    if (!moss.userData.isFallen && tObj.mesh.position.distanceTo(moss.position) < 3.5) {
+                        moss.userData.isFallen = true;
+                        showNotification("명중! 천장의 이끼가 바닥으로 떨어졌습니다.");
+                    }
+
+                    if (tObj.mesh.position.y <= boxHeight / 2) {
+                        tObj.mesh.position.y = boxHeight / 2;
+                        thrownObjects.splice(i, 1); 
+                    }
+                }
+
+                if (moss.userData.isFallen && moss.position.y > 0.25) {
+                    moss.position.y -= 15 * delta; 
+                }
+
+            }
+            prevTime = time;
+            renderer.render(scene, camera);
+        }
+    </script>
+</body>
+</html>
